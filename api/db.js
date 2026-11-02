@@ -1,22 +1,24 @@
 'use strict';
 
 /**
- * Persistent Database Engine supporting both SQLite (data/expense_tracker.db)
- * and JSON file storage (data/transactions.json).
+ * Persistent Database Engine using better-sqlite3 with JSON fallback.
+ * Works on Node 18+ (no built-in node:sqlite required).
  *
  * All amounts are stored as integers (paise = INR × 100) to avoid
  * floating-point rounding errors.
  */
 
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 require('dotenv').config();
 
-const DB_DIR = path.resolve(process.env.DB_PATH || './data');
-const JSON_FILE = path.join(DB_DIR, 'transactions.json');
+const DB_DIR      = path.resolve(process.env.DB_PATH || './data');
+const JSON_FILE   = path.join(DB_DIR, 'transactions.json');
 const SQLITE_FILE = path.join(DB_DIR, 'expense_tracker.db');
 
-// ─── Initialise Directories ──────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// Initialise data directory & JSON seed file
+// ──────────────────────────────────────────────────────────────────────────────
 if (!fs.existsSync(DB_DIR)) {
   fs.mkdirSync(DB_DIR, { recursive: true });
 }
@@ -25,36 +27,42 @@ if (!fs.existsSync(JSON_FILE)) {
   fs.writeFileSync(JSON_FILE, JSON.stringify({ transactions: [] }, null, 2), 'utf8');
 }
 
-// ─── SQLite Integration (node:sqlite built-in in Node v24) ────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// SQLite via better-sqlite3 (falls back to JSON if unavailable)
+// ──────────────────────────────────────────────────────────────────────────────
 let sqliteDb = null;
 try {
-  const { DatabaseSync } = require('node:sqlite');
-  sqliteDb = new DatabaseSync(SQLITE_FILE);
+  const Database = require('better-sqlite3');
+  sqliteDb = new Database(SQLITE_FILE);
   sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS transactions (
-      id TEXT PRIMARY KEY,
-      type TEXT NOT NULL,
-      amount INTEGER NOT NULL,
-      category TEXT NOT NULL,
+      id               TEXT PRIMARY KEY,
+      type             TEXT NOT NULL,
+      amount           INTEGER NOT NULL,
+      category         TEXT NOT NULL,
       transaction_date TEXT NOT NULL,
-      description TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      description      TEXT,
+      created_at       TEXT NOT NULL,
+      updated_at       TEXT NOT NULL
     );
   `);
+  console.log('✅ SQLite (better-sqlite3) connected');
 } catch (err) {
-  console.warn('SQLite warning (falling back to JSON store):', err.message);
+  console.warn('⚠️  SQLite unavailable – using JSON store:', err.message);
 }
 
-// ─── Read / Write helpers ────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// Read / Write helpers
+// ──────────────────────────────────────────────────────────────────────────────
 
 function readAll() {
   if (sqliteDb) {
     try {
-      const rows = sqliteDb.prepare('SELECT * FROM transactions ORDER BY transaction_date DESC, created_at DESC').all();
-      return rows;
-    } catch {
-      // fallback to JSON
+      return sqliteDb
+        .prepare('SELECT * FROM transactions ORDER BY transaction_date DESC, created_at DESC')
+        .all();
+    } catch (err) {
+      console.error('SQLite read error, falling back to JSON:', err.message);
     }
   }
 
@@ -67,35 +75,37 @@ function readAll() {
 }
 
 function writeAll(transactions) {
-  // 1. Write to SQLite database
+  // 1. Write to SQLite
   if (sqliteDb) {
     try {
-      sqliteDb.exec('BEGIN TRANSACTION;');
-      sqliteDb.exec('DELETE FROM transactions;');
-      const stmt = sqliteDb.prepare(`
+      const insert = sqliteDb.prepare(`
         INSERT INTO transactions (id, type, amount, category, transaction_date, description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (@id, @type, @amount, @category, @transaction_date, @description, @created_at, @updated_at)
       `);
-      for (const t of transactions) {
-        stmt.run(
-          t.id,
-          t.type,
-          t.amount,
-          t.category,
-          t.transaction_date,
-          t.description || '',
-          t.created_at,
-          t.updated_at
-        );
-      }
-      sqliteDb.exec('COMMIT;');
+
+      const replaceAll = sqliteDb.transaction((rows) => {
+        sqliteDb.exec('DELETE FROM transactions;');
+        for (const t of rows) {
+          insert.run({
+            id:               t.id,
+            type:             t.type,
+            amount:           t.amount,
+            category:         t.category,
+            transaction_date: t.transaction_date,
+            description:      t.description || '',
+            created_at:       t.created_at,
+            updated_at:       t.updated_at,
+          });
+        }
+      });
+
+      replaceAll(transactions);
     } catch (err) {
-      try { sqliteDb.exec('ROLLBACK;'); } catch (_) { }
       console.error('SQLite write error:', err.message);
     }
   }
 
-  // 2. Atomic write to JSON backup file
+  // 2. Atomic JSON backup
   try {
     const tmp = JSON_FILE + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify({ transactions }, null, 2), 'utf8');
@@ -105,8 +115,9 @@ function writeAll(transactions) {
   }
 }
 
-// ─── Public API ──────────────────────────────────────────────────────────────
-
+// ──────────────────────────────────────────────────────────────────────────────
+// Public API
+// ──────────────────────────────────────────────────────────────────────────────
 module.exports = {
   readAll,
   writeAll,
