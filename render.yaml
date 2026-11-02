@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: expense-tracker-api
+    runtime: node
+    rootDir: api
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DB_PATH
+        value: ./data
+      - key: CORS_ORIGIN
+        fromServiceURL: true   # Replace with your Vercel frontend URL after deploy
+    healthCheckPath: /api/health
+    autoDeploy: true
+
